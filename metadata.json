@@ -1,0 +1,6 @@
+{
+  "name": "Guardian Oracle & Q-Mesh Sovereign Infrastructure",
+  "description": "Architectural console, verifiable execution simulator, and protocol workbench for Guardian Oracle and Q-Mesh distributed sovereign AI infrastructure.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
