@@ -24,7 +24,8 @@ import {
   SecretCanaryVerifier,
   CascadiaMeshTransport,
   SwarmLayerSplitter,
-  NodeCapabilityAd
+  NodeCapabilityAd,
+  createSignedNodeCapabilityAd
 } from '../core';
 
 export const Phase004CView: React.FC = () => {
@@ -79,15 +80,15 @@ export const Phase004CView: React.FC = () => {
   // ==========================================
   const meshTransport = useMemo(() => {
     const t = new CascadiaMeshTransport();
-    // Seed initial certified peer
-    t.receiveGossipAdvertisement({
+    // Seed initial certified peer with authentic CA digital signature
+    const initialAd = createSignedNodeCapabilityAd({
       peerId: 'did:mesh:peer-seattle-01',
       availableTops: 480,
       maxContextTokens: 32768,
       supportedOps: ['prefill', 'speculate'],
       signedTimestamp: Date.now(),
-      operatorSignature: 'valid-ca-sig-0x7a89b'
     });
+    t.receiveGossipAdvertisement(initialAd);
     return t;
   }, []);
 
@@ -105,14 +106,27 @@ export const Phase004CView: React.FC = () => {
   } | null>(null);
 
   const handleBroadcastGossip = () => {
-    const ad: NodeCapabilityAd = {
-      peerId: candidatePeerId,
-      availableTops: candidateTops,
-      maxContextTokens: 65536,
-      supportedOps: candidateOps.split(',').map(s => s.trim()).filter(Boolean),
-      signedTimestamp: Date.now(),
-      operatorSignature: hasValidSignature ? `valid-ca-sig-0x${Math.random().toString(16).slice(2, 8)}` : ''
-    };
+    let ad: NodeCapabilityAd;
+
+    if (hasValidSignature) {
+      ad = createSignedNodeCapabilityAd({
+        peerId: candidatePeerId,
+        availableTops: candidateTops,
+        maxContextTokens: 65536,
+        supportedOps: candidateOps.split(',').map(s => s.trim()).filter(Boolean),
+        signedTimestamp: Date.now(),
+      });
+    } else {
+      // Fabricated signature simulating rogue/unauthorized node attempting admission
+      ad = {
+        peerId: candidatePeerId,
+        availableTops: candidateTops,
+        maxContextTokens: 65536,
+        supportedOps: candidateOps.split(',').map(s => s.trim()).filter(Boolean),
+        signedTimestamp: Date.now(),
+        operatorSignature: 'sig:schnorr:0000000000000000000000000000000000000000000000000000000000000001:0000000000000000000000000000000000000000000000000000000000000001',
+      };
+    }
 
     const result = meshTransport.receiveGossipAdvertisement(ad);
     if (result.success) {

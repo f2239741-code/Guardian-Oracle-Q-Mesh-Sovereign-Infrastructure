@@ -8,9 +8,23 @@
  * PROVISO verifies action proposals against signed authorization events
  * before Commit.
  * Invariant: Memory must never manufacture authority.
+ * 
+ * HARDENED CRYPTOGRAPHIC INVARIANTS:
+ * 1. Cryptographic Signature Verification: Every authorization event's digital
+ *    signature is verified using the authorizing principal's public key.
+ * 2. Append-Only Ledger: The audit trail is an immutable append-only chain.
+ *    Events cannot be mutated in-place; revocations are explicitly appended
+ *    revocation records referencing prior authorization event IDs.
  */
 
 import { TaskPolicyEngine } from '../policy/TaskPolicyEngine';
+import {
+  computeSha256,
+  canonicalizeJson,
+  verifySignature,
+  signPayload,
+  SOVEREIGN_ROOT_AUTHORITY,
+} from '../crypto/cryptoUtils';
 
 export interface CandidateAction {
   readonly actionId: string;
@@ -22,12 +36,39 @@ export interface CandidateAction {
 
 export interface SignedAuthorizationEvent {
   readonly eventId: string;
-  readonly principalSignature: string;
+  readonly principalId: string;
+  readonly principalPublicKey: string; // Secp256k1 compressed public key
+  readonly principalSignature: string; // Schnorr signature over canonical event authorization payload
   readonly authorizedResource: string;
   readonly authorizedOp: string;
-  readonly isRevoked?: boolean;
-  readonly issuedAt?: number;
+  readonly issuedAt: number;
 }
+
+export interface RevocationRecord {
+  readonly recordType: 'REVOCATION';
+  readonly targetEventId: string;
+  readonly revokingPrincipalId: string;
+  readonly revokingPrincipalPublicKey: string;
+  readonly revocationSignature: string;
+  readonly reason: string;
+  readonly revokedAt: number;
+}
+
+export type LedgerEntry =
+  | {
+      readonly type: 'AUTHORIZATION';
+      readonly index: number;
+      readonly entryHash: string;
+      readonly prevHash: string;
+      readonly event: SignedAuthorizationEvent;
+    }
+  | {
+      readonly type: 'REVOCATION';
+      readonly index: number;
+      readonly entryHash: string;
+      readonly prevHash: string;
+      readonly revocation: RevocationRecord;
+    };
 
 export interface VerificationResult {
   readonly valid: boolean;
@@ -36,29 +77,190 @@ export interface VerificationResult {
   readonly verifiedAt: string;
 }
 
+/**
+ * Canonical payload representation for signing and verifying authorization events.
+ */
+export function getAuthorizationEventSigningPayload(event: {
+  eventId: string;
+  principalId: string;
+  authorizedResource: string;
+  authorizedOp: string;
+  issuedAt: number;
+}): string {
+  return canonicalizeJson({
+    authorizedOp: event.authorizedOp,
+    authorizedResource: event.authorizedResource,
+    eventId: event.eventId,
+    issuedAt: event.issuedAt,
+    principalId: event.principalId,
+  });
+}
+
+/**
+ * Helper to construct and cryptographically sign a valid authorization event.
+ */
+export function createSignedAuthorizationEvent(
+  params: {
+    eventId: string;
+    principalId: string;
+    authorizedResource: string;
+    authorizedOp: string;
+    issuedAt?: number;
+  },
+  privateKey: string = SOVEREIGN_ROOT_AUTHORITY.privateKey,
+  publicKey: string = SOVEREIGN_ROOT_AUTHORITY.publicKey
+): SignedAuthorizationEvent {
+  const issuedAt = params.issuedAt ?? Date.now();
+  const payloadToSign = getAuthorizationEventSigningPayload({
+    eventId: params.eventId,
+    principalId: params.principalId,
+    authorizedResource: params.authorizedResource,
+    authorizedOp: params.authorizedOp,
+    issuedAt,
+  });
+
+  const principalSignature = signPayload(payloadToSign, privateKey);
+
+  return {
+    eventId: params.eventId,
+    principalId: params.principalId,
+    principalPublicKey: publicKey,
+    principalSignature,
+    authorizedResource: params.authorizedResource,
+    authorizedOp: params.authorizedOp,
+    issuedAt,
+  };
+}
+
 export class ProvisoVerificationGate {
-  // Append-only signed authorization ledger
-  private readonly authLedger: Map<string, SignedAuthorizationEvent> = new Map();
+  // Cryptographically chained, append-only authorization ledger
+  private readonly ledger: LedgerEntry[] = [];
+  private readonly eventsById: Map<string, SignedAuthorizationEvent> = new Map();
+  private readonly revokedEventIds: Set<string> = new Set();
+  private readonly GENESIS_PREV_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 
   /**
-   * Append a cryptographically signed authorization event to the immutable ledger.
+   * Append a cryptographically signed authorization event to the immutable append-only ledger.
+   * Enforces:
+   * 1. Immutability: duplicate eventIds are strictly rejected.
+   * 2. Cryptographic Verification: digital signature must verify against principalPublicKey.
+   * 3. Chaining: links to previous entry hash.
    */
   public appendAuthorizationEvent(event: SignedAuthorizationEvent): void {
     if (!event || !event.eventId) {
       throw new Error('Invalid authorization event: eventId is required');
     }
-    this.authLedger.set(event.eventId, { ...event, isRevoked: event.isRevoked ?? false });
+
+    if (this.eventsById.has(event.eventId)) {
+      throw new Error(`Append-only ledger violation: event '${event.eventId}' already exists and cannot be overwritten.`);
+    }
+
+    if (!event.principalPublicKey || !event.principalSignature) {
+      throw new Error('Cryptographic rejection: Authorization event missing principal public key or digital signature.');
+    }
+
+    // Cryptographically verify digital signature over canonical payload
+    const payloadToVerify = getAuthorizationEventSigningPayload({
+      eventId: event.eventId,
+      principalId: event.principalId,
+      authorizedResource: event.authorizedResource,
+      authorizedOp: event.authorizedOp,
+      issuedAt: event.issuedAt,
+    });
+
+    const isSigValid = verifySignature(payloadToVerify, event.principalSignature, event.principalPublicKey);
+    if (!isSigValid) {
+      throw new Error(
+        `Cryptographic rejection: Invalid digital signature on authorization event '${event.eventId}'. Verification failed.`
+      );
+    }
+
+    const prevHash = this.ledger.length === 0
+      ? this.GENESIS_PREV_HASH
+      : this.ledger[this.ledger.length - 1].entryHash;
+
+    const index = this.ledger.length;
+    const entryData = {
+      type: 'AUTHORIZATION' as const,
+      index,
+      prevHash,
+      event: { ...event },
+    };
+    const entryHash = computeSha256(canonicalizeJson(entryData));
+
+    const entry: LedgerEntry = {
+      type: 'AUTHORIZATION',
+      index,
+      entryHash,
+      prevHash,
+      event: Object.freeze({ ...event }),
+    };
+
+    this.ledger.push(entry);
+    this.eventsById.set(event.eventId, entry.event);
   }
 
   /**
-   * Mark an authorization event as revoked in the ledger.
+   * Revoke an authorization event by appending an explicit REVOCATION record to the append-only ledger.
+   * Does NOT mutate previous records in-place.
    */
-  public revokeAuthorizationEvent(eventId: string): boolean {
-    const existing = this.authLedger.get(eventId);
+  public revokeAuthorizationEvent(
+    targetEventId: string,
+    reason: string = 'Administrative revocation',
+    revokingPrincipalId: string = 'did:mesh:authority-root',
+    revokingPrivateKey: string = SOVEREIGN_ROOT_AUTHORITY.privateKey,
+    revokingPublicKey: string = SOVEREIGN_ROOT_AUTHORITY.publicKey
+  ): boolean {
+    const existing = this.eventsById.get(targetEventId);
     if (!existing) {
       return false;
     }
-    this.authLedger.set(eventId, { ...existing, isRevoked: true });
+
+    if (this.revokedEventIds.has(targetEventId)) {
+      return true; // Already revoked
+    }
+
+    const revokedAt = Date.now();
+    const revocationPayload = canonicalizeJson({
+      reason,
+      revokedAt,
+      revokingPrincipalId,
+      targetEventId,
+    });
+
+    const revocationSignature = signPayload(revocationPayload, revokingPrivateKey);
+    const prevHash = this.ledger.length === 0
+      ? this.GENESIS_PREV_HASH
+      : this.ledger[this.ledger.length - 1].entryHash;
+
+    const index = this.ledger.length;
+    const revocationRecord: RevocationRecord = {
+      recordType: 'REVOCATION',
+      targetEventId,
+      revokingPrincipalId,
+      revokingPrincipalPublicKey: revokingPublicKey,
+      revocationSignature,
+      reason,
+      revokedAt,
+    };
+
+    const entryHash = computeSha256(canonicalizeJson({
+      type: 'REVOCATION',
+      index,
+      prevHash,
+      revocation: revocationRecord,
+    }));
+
+    const entry: LedgerEntry = {
+      type: 'REVOCATION',
+      index,
+      entryHash,
+      prevHash,
+      revocation: Object.freeze(revocationRecord),
+    };
+
+    this.ledger.push(entry);
+    this.revokedEventIds.add(targetEventId);
     return true;
   }
 
@@ -66,39 +268,57 @@ export class ProvisoVerificationGate {
    * Retrieve an authorization event from the ledger.
    */
   public getAuthorizationEvent(eventId: string): SignedAuthorizationEvent | undefined {
-    return this.authLedger.get(eventId);
+    return this.eventsById.get(eventId);
+  }
+
+  /**
+   * Check if an event has been revoked in the ledger.
+   */
+  public isEventRevoked(eventId: string): boolean {
+    return this.revokedEventIds.has(eventId);
   }
 
   /**
    * List all authorization events recorded in the ledger.
    */
   public listAuthorizationEvents(): ReadonlyArray<SignedAuthorizationEvent> {
-    return Array.from(this.authLedger.values());
+    return Array.from(this.eventsById.values());
+  }
+
+  /**
+   * Get the complete immutable ledger entries.
+   */
+  public getLedger(): ReadonlyArray<LedgerEntry> {
+    return [...this.ledger];
   }
 
   /**
    * Clear ledger (solely for test lifecycle isolation).
    */
   public clear(): void {
-    this.authLedger.clear();
+    this.ledger.length = 0;
+    this.eventsById.clear();
+    this.revokedEventIds.clear();
   }
 
   /**
    * Evaluates CandidateResult against authoritative permission ledger.
    * 
    * CRITICAL GUARANTEES:
-   * 1. Check REALM policy engine capability grant.
-   * 2. Verify against append-only signed authorization ledger (NOT remembered text or model summary).
-   * 3. Learned controller / model output is NEVER sufficient justification for execution.
+   * 1. Check REALM policy engine capability grant with mandatory recipient check.
+   * 2. Verify against append-only signed authorization ledger.
+   * 3. Re-verify digital signatures cryptographically against registered public keys.
+   * 4. Verify event has not been revoked by any subsequent ledger revocation entry.
+   * 5. Learned controller / model output is NEVER sufficient justification for execution.
    */
   public verifyCandidateAction(
     action: CandidateAction,
     policyEngine: TaskPolicyEngine,
-    recipientAgentId?: string
+    recipientAgentId: string
   ): VerificationResult {
     const nowIso = new Date().toISOString();
 
-    // 1. Check REALM policy engine grant
+    // 1. Check REALM policy engine grant with mandatory recipient validation
     const hasCapability = policyEngine.evaluateAccess(
       action.targetResource,
       action.operation,
@@ -108,17 +328,17 @@ export class ProvisoVerificationGate {
     if (!hasCapability) {
       return {
         valid: false,
-        reason: `REJECTED: No valid capability grant for resource '${action.targetResource}' with operation '${action.operation}'.`,
+        reason: `REJECTED: No valid capability grant for resource '${action.targetResource}' with operation '${action.operation}' for recipient '${recipientAgentId}'.`,
         verifiedAt: nowIso,
       };
     }
 
-    // 2. Verify against append-only authorization ledger (not remembered text or memory summaries)
-    const matchingEvents = Array.from(this.authLedger.values()).filter(
+    // 2. Verify against append-only authorization ledger
+    const matchingEvents = Array.from(this.eventsById.values()).filter(
       (e) =>
         e.authorizedResource === action.targetResource &&
         e.authorizedOp === action.operation &&
-        !e.isRevoked
+        !this.revokedEventIds.has(e.eventId)
     );
 
     if (matchingEvents.length === 0) {
@@ -131,6 +351,29 @@ export class ProvisoVerificationGate {
     }
 
     const matchedEvent = matchingEvents[0];
+
+    // 3. Cryptographically verify digital signature
+    const payloadToVerify = getAuthorizationEventSigningPayload({
+      eventId: matchedEvent.eventId,
+      principalId: matchedEvent.principalId,
+      authorizedResource: matchedEvent.authorizedResource,
+      authorizedOp: matchedEvent.authorizedOp,
+      issuedAt: matchedEvent.issuedAt,
+    });
+
+    const isSigValid = verifySignature(
+      payloadToVerify,
+      matchedEvent.principalSignature,
+      matchedEvent.principalPublicKey
+    );
+
+    if (!isSigValid) {
+      return {
+        valid: false,
+        reason: `REJECTED: Cryptographic failure. Principal signature on event '${matchedEvent.eventId}' is invalid or forged.`,
+        verifiedAt: nowIso,
+      };
+    }
 
     return {
       valid: true,

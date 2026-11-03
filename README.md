@@ -69,16 +69,39 @@ The implementation is organized into six core modules spanning four architectura
 ├── planner/
 │   └── ContextPipe.ts           # 5-Stage deterministic query planner & token accountant
 ├── policy/
-│   └── TaskPolicyEngine.ts      # REALM capability grants & contextual integrity rules
+│   └── TaskPolicyEngine.ts      # REALM capability grants (requires auth ref & mandatory recipient)
 ├── verification/
-│   └── ProvisoVerificationGate.ts # PROVISO dual-stage gate & append-only auth ledger
+│   └── ProvisoVerificationGate.ts # PROVISO gate & append-only hash-chained auth ledger
 ├── commit/
-│   └── CommitReceipt.ts         # Content-addressed SHA-256 receipts & DAG lineage chain
-└── mesh/
-    ├── CascadiaMeshTransport.ts        # CA-signed peer gossip & topology discovery
-    ├── SpeculativeBandwidthCalculator.ts # DISCO WAN crossover evaluation engine
-    └── SecretCanaryDriftDetector.ts    # Byzantine canary activation drift detector
+│   └── CommitReceipt.ts         # Digitally signed content-addressed receipts & DAG lineage
+├── mesh/
+│   ├── CascadiaMeshTransport.ts        # CA-signed peer gossip & admission verification
+│   ├── SpeculativeBandwidthCalculator.ts # DISCO WAN crossover evaluation engine
+│   └── SecretCanaryDriftDetector.ts    # Byzantine canary activation drift detector
+└── crypto/
+    └── cryptoUtils.ts           # Secp256k1 Schnorr asymmetric signatures & canonicalizer
 ```
+
+---
+
+## Cryptographic Hardening & Security Controls
+
+1. **PROVISO Cryptographic Signature Verification (`ProvisoVerificationGate.ts`)**:
+   - Every authorization event's digital signature is verified against the principal's registered public key using Secp256k1 Schnorr cryptography.
+   - The authorization ledger is an immutable, append-only cryptographic hash chain (`prevHash` ⟶ `entryHash`).
+   - Revocations are explicitly appended signed `REVOCATION` records; past ledger entries cannot be mutated in place.
+
+2. **Cascadia CA Admission Invariant (`CascadiaMeshTransport.ts`)**:
+   - Peer capability advertisements must be digitally signed by a trusted root Certificate Authority (CA).
+   - Fabricated, tampered, or untrusted CA signatures are rejected fail-closed before peer discovery or task scheduling.
+
+3. **Digital Signature Commit Receipts (`CommitReceipt.ts`)**:
+   - Every `CommitReceipt` is signed by the sovereign authority's private key over the content-addressed `receiptId`.
+   - Verification checks both payload integrity and digital signatures, eliminating blind reliance on caller-supplied boolean flags.
+
+4. **Task-Graph Contextual Integrity (`TaskPolicyEngine.ts`)**:
+   - `issueGrant()` requires an explicit `SovereignAuthorizationEventRef` (authority cannot be manufactured from memory).
+   - `evaluateAccess()` strictly mandates `recipientAgentId` and verifies it against `downstreamPropagationScope` (fail-closed if omitted).
 
 ---
 
@@ -86,7 +109,7 @@ The implementation is organized into six core modules spanning four architectura
 
 The repository has undergone automated test verification and production compilation checks:
 
-* **Automated Test Suite**: `39 passing assertions` across 9 test suites (`0 failures`, `0 skipped`).
+* **Automated Test Suite**: `52 passing assertions` across 10 test suites (`0 failures`, `0 skipped`).
 * **TypeScript Type Safety**: Clean `tsc --noEmit` check with `0 errors`.
 * **Production Compilation**: Production `Vite` bundle compiles cleanly without errors or warnings.
 * **Interactive Workbenches**: Live execution workbenches (`Phase004AView`, `Phase003HView`, `Phase004BView`, `Phase004CView`, `PipelineSimulatorModal`) integrated directly into the console UI.
@@ -101,7 +124,7 @@ The repository has undergone automated test verification and production compilat
 # Install dependencies
 npm install
 
-# Run the full automated test suite (39 assertions across 9 test suites)
+# Run the full automated test suite (52 assertions across 10 test suites)
 npm test
 
 # Run TypeScript type check

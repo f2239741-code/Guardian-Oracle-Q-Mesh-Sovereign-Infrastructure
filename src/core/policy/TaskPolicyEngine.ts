@@ -8,12 +8,25 @@
  * REALM-style resource-bound capability grants enforce least privilege:
  * Discovering an asset NEVER grants authorization to use it.
  * Invariant: Asset Discovery ≠ Execution Authority.
+ * 
+ * HARDENED SECURITY INVARIANTS:
+ * 1. Authority cannot be manufactured: issueGrant requires an explicit SovereignAuthorizationEventRef.
+ * 2. Downstream recipient verification is strictly mandatory: evaluateAccess requires recipientAgentId
+ *    and verifies it against downstreamPropagationScope (fail-closed if omitted or unauthorized).
  */
 
+export interface SovereignAuthorizationEventRef {
+  readonly authEventId: string;
+  readonly principalId: string;
+  readonly signature?: string;
+}
+
 export interface ResourceGrant {
+  readonly grantId: string;
   readonly resourceId: string;
   readonly permittedOperations: ReadonlySet<string>;
   readonly downstreamPropagationScope: ReadonlySet<string>;
+  readonly authorizationRef: SovereignAuthorizationEventRef;
   readonly expiresAt: number; // in seconds (epoch)
   readonly issuedAt: number;
 }
@@ -48,23 +61,41 @@ export class TaskPolicyEngine {
   }
 
   /**
-   * Explicitly issue a time-bounded capability grant tied to signed authorization.
+   * Explicitly issue a time-bounded capability grant tied to a verified authorization event.
+   * INVARIANT: Capability grants MUST reference a backing authorization event; authority
+   * cannot be manufactured from memory or unstructured caller request.
    */
   public issueGrant(
     resourceId: string,
     operations: Iterable<string>,
     allowedDownstream: Iterable<string>,
+    authorizationRef: SovereignAuthorizationEventRef,
     ttlSeconds: number = 300.0
   ): ResourceGrant {
-    if (!resourceId) {
-      throw new Error('Invalid resourceId');
+    if (!resourceId || typeof resourceId !== 'string') {
+      throw new Error('Invalid resourceId: resourceId must be a non-empty string');
+    }
+
+    if (
+      !authorizationRef ||
+      typeof authorizationRef.authEventId !== 'string' ||
+      authorizationRef.authEventId.trim().length === 0 ||
+      typeof authorizationRef.principalId !== 'string' ||
+      authorizationRef.principalId.trim().length === 0
+    ) {
+      throw new Error(
+        'TaskPolicyEngine: Cannot manufacture authority. An explicit SovereignAuthorizationEventRef with authEventId and principalId is strictly required.'
+      );
     }
 
     const now = Date.now() / 1000;
+    const grantId = `grant_${resourceId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${Date.now()}`;
     const grant: ResourceGrant = {
+      grantId,
       resourceId,
       permittedOperations: Object.freeze(new Set(operations)),
       downstreamPropagationScope: Object.freeze(new Set(allowedDownstream)),
+      authorizationRef: { ...authorizationRef },
       expiresAt: now + ttlSeconds,
       issuedAt: now,
     };
@@ -94,13 +125,19 @@ export class TaskPolicyEngine {
    * 1. Target resource must have an explicit active grant (discovery alone fails closed).
    * 2. Current timestamp must be within TTL.
    * 3. Requested operation must be explicitly permitted.
-   * 4. Downstream recipient agent ID must be within authorized propagation scope.
+   * 4. Recipient agent ID is MANDATORY and must be within authorized downstream propagation scope.
+   *    Omitting or passing empty recipientAgentId fails closed.
    */
   public evaluateAccess(
     targetResource: string,
     requestedOp: string,
-    recipientAgentId?: string
+    recipientAgentId: string
   ): boolean {
+    // Recipient verification is strictly mandatory
+    if (!recipientAgentId || typeof recipientAgentId !== 'string' || recipientAgentId.trim() === '') {
+      return false; // Fail-closed: Cannot bypass downstream propagation check by omitting recipient
+    }
+
     const grant = this.grants.get(targetResource);
 
     // Asset may be discovered, but no explicit grant exists -> REJECT
@@ -117,10 +154,7 @@ export class TaskPolicyEngine {
       return false; // Operation not authorized
     }
 
-    if (
-      recipientAgentId &&
-      !grant.downstreamPropagationScope.has(recipientAgentId)
-    ) {
+    if (!grant.downstreamPropagationScope.has(recipientAgentId)) {
       // Violates Task-Graph Contextual Integrity downstream propagation
       return false;
     }

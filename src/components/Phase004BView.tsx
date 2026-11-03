@@ -16,9 +16,17 @@ import {
   ShieldAlert
 } from 'lucide-react';
 import { SAMPLE_TASK_STATE } from '../data/reportData';
-import { ProvisoVerificationGate, CandidateAction, SignedAuthorizationEvent } from '../core/verification/ProvisoVerificationGate';
+import { 
+  ProvisoVerificationGate, 
+  CandidateAction, 
+  createSignedAuthorizationEvent 
+} from '../core/verification/ProvisoVerificationGate';
 import { TaskPolicyEngine } from '../core/policy/TaskPolicyEngine';
-import { CommitReceiptBuilder, CommitReceipt } from '../core/commit/CommitReceipt';
+import { 
+  CommitReceiptBuilder, 
+  CommitReceipt, 
+  createSignedAuthorizationRef 
+} from '../core/commit/CommitReceipt';
 
 export const Phase004BView: React.FC = () => {
   // Pufibara State-Binding Rule Simulator
@@ -311,19 +319,26 @@ const ProvisoLiveWorkbench: React.FC = () => {
         targetResource,
         [targetOp, 'read'],
         ['agent-proposer'],
+        {
+          authEventId: 'evt-sig-991',
+          principalId: 'did:mesh:authority-sovereign',
+        },
         300
       );
     }
 
     const gate = new ProvisoVerificationGate();
     if (hasLedgerSignature) {
-      gate.appendAuthorizationEvent({
+      const event = createSignedAuthorizationEvent({
         eventId: 'evt-sig-991',
-        principalSignature: 'sig:ed25519:sovereign-root-key',
+        principalId: 'did:mesh:authority-sovereign',
         authorizedResource: targetResource,
         authorizedOp: targetOp,
-        isRevoked: isEventRevoked,
       });
+      gate.appendAuthorizationEvent(event);
+      if (isEventRevoked) {
+        gate.revokeAuthorizationEvent('evt-sig-991', 'Administrative test revocation');
+      }
     }
 
     const action: CandidateAction = {
@@ -500,12 +515,13 @@ const CommitReceiptLiveWorkbench: React.FC = () => {
         executionTimeMs: 124,
         environmentSignature: "linux-x86_64-node22",
       })
-      .setAuthorizationRef({
-        authEventId: "evt-sig-991",
-        grantId: "grant-finance-commit-300s",
-        principalId: authPrincipal,
-        isVerified: true,
-      })
+      .setAuthorizationRef(
+        createSignedAuthorizationRef({
+          authEventId: "evt-sig-991",
+          grantId: "grant-finance-commit-300s",
+          principalId: authPrincipal,
+        })
+      )
       .setStateDelta({
         account: "treasury_sovereign",
         balanceDelta: +250000,

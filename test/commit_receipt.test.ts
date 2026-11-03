@@ -4,6 +4,12 @@
  * 
  * GUARDIAN ORACLE / Q-MESH SOVEREIGN INFRASTRUCTURE
  * AUTOMATED TESTS: MODULE 4 — COMMITRECEIPT & TRACEs ENGINE (PHASE 004B)
+ * 
+ * HARDENED CRYPTOGRAPHIC TESTING:
+ * - Digital signature verification over receipt payload
+ * - Rejection of forged or fabricated authority signatures
+ * - Cryptographic verification of nested authorization reference
+ * - Elimination of blind 'isVerified: boolean' trust
  */
 
 import { test, describe } from 'node:test';
@@ -14,6 +20,9 @@ import {
   LineageEntry,
   ExecutionEvidence,
   SovereignAuthorizationRef,
+  createSignedAuthorizationRef,
+  SOVEREIGN_ROOT_AUTHORITY,
+  generateKeyPair,
 } from '../src/core';
 
 describe('Module 4: CommitReceipt — Portable Lineage & Verification Engine', () => {
@@ -25,12 +34,11 @@ describe('Module 4: CommitReceipt — Portable Lineage & Verification Engine', (
     environmentSignature: 'node-22.23.3-linux-x86_64',
   };
 
-  const sampleAuth: SovereignAuthorizationRef = {
+  const sampleAuth: SovereignAuthorizationRef = createSignedAuthorizationRef({
     authEventId: 'evt-sig-991',
     grantId: 'grant-finance-commit-300s',
     principalId: 'did:mesh:principal-sovereign-root',
-    isVerified: true,
-  };
+  });
 
   const sampleLineage: LineageEntry = {
     recordId: 'rec-quarterly-q3',
@@ -39,7 +47,7 @@ describe('Module 4: CommitReceipt — Portable Lineage & Verification Engine', (
     timestamp: Date.now() - 5000,
   };
 
-  test('Successfully builds a content-addressed CommitReceipt with verified integrity', () => {
+  test('Successfully builds a content-addressed, digitally signed CommitReceipt with verified integrity', () => {
     const builder = new CommitReceiptBuilder();
     builder
       .addLineageEntry(sampleLineage)
@@ -51,16 +59,18 @@ describe('Module 4: CommitReceipt — Portable Lineage & Verification Engine', (
 
     assert.ok(receipt.receiptId);
     assert.equal(receipt.receiptId.length, 64);
+    assert.ok(receipt.authoritySignature.startsWith('sig:schnorr:'));
+    assert.equal(receipt.authorizingPublicKey, SOVEREIGN_ROOT_AUTHORITY.publicKey);
     assert.equal(receipt.inputLineage.length, 1);
     assert.equal(receipt.inputLineage[0].recordId, 'rec-quarterly-q3');
     assert.equal(receipt.evidence.executorId, 'mock-deterministic-v1');
     assert.equal(receipt.authorization.authEventId, 'evt-sig-991');
 
-    // Cryptographic content-addressed verification
+    // Cryptographic digital signature + content-addressed verification
     assert.equal(CommitReceiptBuilder.verifyReceiptIntegrity(receipt), true);
   });
 
-  test('Detects tamper attempts and invalidates modified receipts', () => {
+  test('Detects tamper attempts and invalidates modified receipt payloads', () => {
     const builder = new CommitReceiptBuilder();
     builder
       .addLineageEntry(sampleLineage)
@@ -80,18 +90,39 @@ describe('Module 4: CommitReceipt — Portable Lineage & Verification Engine', (
     assert.equal(CommitReceiptBuilder.verifyReceiptIntegrity(tamperedReceipt), false);
   });
 
-  test('Fails when attempting to attach an unverified authorization reference', () => {
+  test('Rejects fabricated or forged authority digital signatures', () => {
     const builder = new CommitReceiptBuilder();
-    const unverifiedAuth: SovereignAuthorizationRef = {
+    builder
+      .addLineageEntry(sampleLineage)
+      .setExecutionEvidence(sampleEvidence)
+      .setAuthorizationRef(sampleAuth)
+      .setStateDelta({ committedState: 'RECORD_V2' });
+
+    const receipt = builder.build();
+
+    // Tamper with digital signature
+    const forgedReceipt: CommitReceipt = {
+      ...receipt,
+      authoritySignature: 'sig:schnorr:0000000000000000000000000000000000000000000000000000000000000001:0000000000000000000000000000000000000000000000000000000000000001',
+    };
+
+    assert.equal(CommitReceiptBuilder.verifyReceiptIntegrity(forgedReceipt), false);
+  });
+
+  test('Fails when attempting to attach an unverified or forged authorization reference', () => {
+    const builder = new CommitReceiptBuilder();
+    const forgedKey = generateKeyPair('attacker_keys');
+    const forgedAuth: SovereignAuthorizationRef = {
       authEventId: 'evt-unverified-000',
       grantId: 'grant-unverified',
       principalId: 'attacker-agent',
-      isVerified: false,
+      principalPublicKey: forgedKey.publicKey,
+      authorizationSignature: 'sig:schnorr:0000000000000000000000000000000000000000000000000000000000000001:0000000000000000000000000000000000000000000000000000000000000001',
     };
 
     assert.throws(
       () => {
-        builder.setAuthorizationRef(unverifiedAuth);
+        builder.setAuthorizationRef(forgedAuth);
       },
       (err: Error) => {
         assert.match(err.message, /Cannot attach unverified authorization ref/);

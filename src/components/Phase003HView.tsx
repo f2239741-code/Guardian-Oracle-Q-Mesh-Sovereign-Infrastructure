@@ -371,6 +371,10 @@ const RealmPolicyLiveWorkbench: React.FC = () => {
         targetResource,
         ['read', 'commit'],
         ['agent-auditor'],
+        {
+          authEventId: 'evt-sig-realm-001',
+          principalId: 'did:mesh:authority-auditor',
+        },
         ttlSeconds
       );
     }

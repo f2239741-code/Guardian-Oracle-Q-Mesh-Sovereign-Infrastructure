@@ -22,3 +22,4 @@ export * from './commit/CommitReceipt';
 export * from './mesh/CascadiaMeshTransport';
 export * from './mesh/SpeculativeBandwidthCalculator';
 export * from './mesh/SecretCanaryDriftDetector';
+export * from './crypto/cryptoUtils';

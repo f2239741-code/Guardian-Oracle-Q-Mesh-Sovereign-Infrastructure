@@ -22,6 +22,8 @@ import {
   ProvisoVerificationGate,
   CommitReceiptBuilder,
   CommitReceipt,
+  createSignedAuthorizationEvent,
+  createSignedAuthorizationRef,
   SecretCanaryVerifier,
   WanStateDecisionEngine
 } from '../core';
@@ -210,6 +212,10 @@ export const PipelineSimulatorModal: React.FC<PipelineSimulatorModalProps> = ({
               'asset://system/sovereign-state',
               ['read', 'append'],
               ['scope://pipeline/e2e'],
+              {
+                authEventId: 'evt-sim-asset-01',
+                principalId: 'did:mesh:authority-root',
+              },
               120
             );
 
@@ -226,17 +232,20 @@ export const PipelineSimulatorModal: React.FC<PipelineSimulatorModalProps> = ({
               'asset://state/dag',
               ['commit'],
               ['agent-e2e'],
+              {
+                authEventId: 'evt-ledger-active-912',
+                principalId: 'did:mesh:authority-root',
+              },
               300
             );
             const gate = new ProvisoVerificationGate();
-            gate.appendAuthorizationEvent({
+            const signedEvent = createSignedAuthorizationEvent({
               eventId: 'evt-ledger-active-912',
+              principalId: 'did:mesh:authority-root',
               authorizedResource: 'asset://state/dag',
               authorizedOp: 'commit',
-              principalSignature: 'sig-principal-verified',
-              issuedAt: Date.now(),
-              isRevoked: false
             });
+            gate.appendAuthorizationEvent(signedEvent);
             const result = gate.verifyCandidateAction(
               {
                 actionId: 'act-commit-01',
@@ -271,12 +280,13 @@ export const PipelineSimulatorModal: React.FC<PipelineSimulatorModalProps> = ({
               executionTimeMs: 168,
               environmentSignature: 'node-22-v8-opt'
             });
-            builder.setAuthorizationRef({
-              authEventId: 'evt-ledger-active-912',
-              grantId: 'grant-proviso-sim',
-              principalId: 'did:mesh:authority-root',
-              isVerified: true
-            });
+            builder.setAuthorizationRef(
+              createSignedAuthorizationRef({
+                authEventId: 'evt-ledger-active-912',
+                grantId: 'grant-proviso-sim',
+                principalId: 'did:mesh:authority-root',
+              })
+            );
             builder.setStateDelta({
               targetEntity: 'asset://state/dag',
               stateBeforeHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',

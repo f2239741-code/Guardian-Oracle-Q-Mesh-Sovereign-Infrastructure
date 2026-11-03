@@ -4,6 +4,12 @@
  * 
  * GUARDIAN ORACLE / Q-MESH SOVEREIGN INFRASTRUCTURE
  * AUTOMATED TESTS: MODULE 5 — CASCADIA MESH & PHASE 004C PEER COMPUTE
+ * 
+ * HARDENED CRYPTOGRAPHIC TESTING:
+ * - CA admission verification using root CA public key
+ * - Rejection of fabricated or forged CA operator signatures
+ * - Rejection of untrusted CA public keys
+ * - WAN crossover & Secret Canary activation drift verification
  */
 
 import { test, describe, beforeEach } from 'node:test';
@@ -15,6 +21,9 @@ import {
   WanStateDecisionEngine,
   SecretCanaryVerifier,
   SwarmLayerSplitter,
+  createSignedNodeCapabilityAd,
+  CASCADIA_ROOT_CA,
+  generateKeyPair,
 } from '../src/core';
 
 describe('Module 5: CascadiaMeshTransport — Signed Peer Gossip & Routing', () => {
@@ -24,15 +33,14 @@ describe('Module 5: CascadiaMeshTransport — Signed Peer Gossip & Routing', () 
     transport = new CascadiaMeshTransport();
   });
 
-  test('Accepts valid signed capability advertisement from gossip', () => {
-    const validAd: NodeCapabilityAd = {
+  test('Accepts valid signed capability advertisement from gossip with CA digital signature', () => {
+    const validAd = createSignedNodeCapabilityAd({
       peerId: 'peer:node-alpha-44',
       availableTops: 78,
       maxContextTokens: 8192,
       supportedOps: ['prefill', 'speculative_draft', 'canary_eval'],
       signedTimestamp: Date.now(),
-      operatorSignature: 'sig:ed25519:operator-ca-root-alpha',
-    };
+    });
 
     const res = transport.receiveGossipAdvertisement(validAd);
     assert.equal(res.success, true);
@@ -55,15 +63,50 @@ describe('Module 5: CascadiaMeshTransport — Signed Peer Gossip & Routing', () 
     assert.equal(transport.getPeer('peer:rogue-node-00'), undefined);
   });
 
+  test('Critical: Rejects fabricated or forged CA operator signature fail-closed', () => {
+    const forgedAd: NodeCapabilityAd = {
+      peerId: 'peer:fabricated-sig-node',
+      availableTops: 500,
+      maxContextTokens: 65536,
+      supportedOps: ['prefill', 'speculate'],
+      signedTimestamp: Date.now(),
+      // Fabricated string with fresh timestamp
+      operatorSignature: 'sig:schnorr:0000000000000000000000000000000000000000000000000000000000000001:0000000000000000000000000000000000000000000000000000000000000001',
+    };
+
+    const res = transport.receiveGossipAdvertisement(forgedAd);
+    assert.equal(res.success, false);
+    assert.match(res.reason ?? '', /Cryptographic verification failed/);
+    assert.equal(transport.getPeer('peer:fabricated-sig-node'), undefined);
+  });
+
+  test('Rejects advertisement signed by an untrusted or unrecognized CA', () => {
+    const untrustedCa = generateKeyPair('rogue_untrusted_ca');
+    const adFromUntrustedCa = createSignedNodeCapabilityAd(
+      {
+        peerId: 'peer:untrusted-node',
+        availableTops: 200,
+        maxContextTokens: 16384,
+        supportedOps: ['prefill'],
+        signedTimestamp: Date.now(),
+      },
+      untrustedCa.privateKey,
+      untrustedCa.publicKey
+    );
+
+    const res = transport.receiveGossipAdvertisement(adFromUntrustedCa);
+    assert.equal(res.success, false);
+    assert.match(res.reason ?? '', /Untrusted or unrecognized Certificate Authority/);
+  });
+
   test('Rejects stale gossip advertisements (>60s age)', () => {
-    const staleAd: NodeCapabilityAd = {
+    const staleAd = createSignedNodeCapabilityAd({
       peerId: 'peer:stale-node-99',
       availableTops: 50,
       maxContextTokens: 4096,
       supportedOps: ['prefill'],
       signedTimestamp: Date.now() - 120000, // 2 minutes old
-      operatorSignature: 'sig:ed25519:valid-ca',
-    };
+    });
 
     const res = transport.receiveGossipAdvertisement(staleAd);
     assert.equal(res.success, false);
@@ -71,14 +114,14 @@ describe('Module 5: CascadiaMeshTransport — Signed Peer Gossip & Routing', () 
   });
 
   test('Selects optimal peer matching required operations and lowest latency', () => {
-    transport.receiveGossipAdvertisement({
+    const slowPeer = createSignedNodeCapabilityAd({
       peerId: 'peer:slow-high-tops',
       availableTops: 120,
       maxContextTokens: 8192,
       supportedOps: ['prefill', 'speculative_draft'],
       signedTimestamp: Date.now(),
-      operatorSignature: 'sig:ca:1',
     });
+    transport.receiveGossipAdvertisement(slowPeer);
     transport.recordPeerHealth({
       peerId: 'peer:slow-high-tops',
       latencyMs: 180,
@@ -87,14 +130,14 @@ describe('Module 5: CascadiaMeshTransport — Signed Peer Gossip & Routing', () 
       isHealthy: true,
     });
 
-    transport.receiveGossipAdvertisement({
+    const fastPeer = createSignedNodeCapabilityAd({
       peerId: 'peer:fast-low-tops',
       availableTops: 60,
       maxContextTokens: 8192,
       supportedOps: ['prefill', 'speculative_draft'],
       signedTimestamp: Date.now(),
-      operatorSignature: 'sig:ca:2',
     });
+    transport.receiveGossipAdvertisement(fastPeer);
     transport.recordPeerHealth({
       peerId: 'peer:fast-low-tops',
       latencyMs: 25, // Much faster latency

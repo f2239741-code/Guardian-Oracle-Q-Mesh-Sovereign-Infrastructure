@@ -7,10 +7,18 @@
  * 
  * Implements:
  * 1. CascadiaMeshTransport: Control-plane-free P2P capability gossip & peer discovery
+ *    with cryptographic Certificate Authority (CA) admission verification.
  * 2. WanStateDecisionEngine: Bandwidth crossover threshold calculator (MHA vs GQA)
  * 3. SecretCanaryVerifier: Activation drift measurement for Byzantine peer isolation
  * 4. SwarmLayerSplitter: Dynamic GPU VRAM / Host RAM layer splitting
  */
+
+import {
+  canonicalizeJson,
+  verifySignature,
+  signPayload,
+  CASCADIA_ROOT_CA,
+} from '../crypto/cryptoUtils';
 
 export interface NodeCapabilityAd {
   readonly peerId: string;
@@ -18,7 +26,8 @@ export interface NodeCapabilityAd {
   readonly maxContextTokens: number;
   readonly supportedOps: readonly string[];
   readonly signedTimestamp: number;
-  readonly operatorSignature: string;       // Signed by node certificate authority
+  readonly operatorSignature: string;       // Cryptographically signed by node certificate authority
+  readonly caPublicKey?: string;           // Compressed public key of issuing CA (defaults to Cascadia Root CA)
 }
 
 export interface PeerHealthStatus {
@@ -39,23 +48,98 @@ export interface PeerTaskBid {
 }
 
 /**
- * Control-plane-free Cascadia P2P Gossip Transport
+ * Returns canonical payload string of capability advertisement for cryptographic signing and verification.
+ */
+export function getCapabilityAdSigningPayload(
+  ad: Pick<NodeCapabilityAd, 'peerId' | 'availableTops' | 'maxContextTokens' | 'supportedOps' | 'signedTimestamp'>
+): string {
+  return canonicalizeJson({
+    availableTops: ad.availableTops,
+    maxContextTokens: ad.maxContextTokens,
+    peerId: ad.peerId,
+    signedTimestamp: ad.signedTimestamp,
+    supportedOps: [...ad.supportedOps].sort(),
+  });
+}
+
+/**
+ * Helper to construct and cryptographically sign a node capability advertisement with a CA key.
+ */
+export function createSignedNodeCapabilityAd(
+  params: {
+    peerId: string;
+    availableTops: number;
+    maxContextTokens: number;
+    supportedOps: readonly string[];
+    signedTimestamp?: number;
+  },
+  caPrivateKey: string = CASCADIA_ROOT_CA.privateKey,
+  caPublicKey: string = CASCADIA_ROOT_CA.publicKey
+): NodeCapabilityAd {
+  const signedTimestamp = params.signedTimestamp ?? Date.now();
+  const payloadToSign = getCapabilityAdSigningPayload({
+    peerId: params.peerId,
+    availableTops: params.availableTops,
+    maxContextTokens: params.maxContextTokens,
+    supportedOps: params.supportedOps,
+    signedTimestamp,
+  });
+
+  const operatorSignature = signPayload(payloadToSign, caPrivateKey);
+
+  return {
+    peerId: params.peerId,
+    availableTops: params.availableTops,
+    maxContextTokens: params.maxContextTokens,
+    supportedOps: params.supportedOps,
+    signedTimestamp,
+    operatorSignature,
+    caPublicKey,
+  };
+}
+
+/**
+ * Control-plane-free Cascadia P2P Gossip Transport with Root CA Signature Verification
  */
 export class CascadiaMeshTransport {
   private readonly knownPeers: Map<string, NodeCapabilityAd> = new Map();
   private readonly peerHealth: Map<string, PeerHealthStatus> = new Map();
   private readonly maxGossipAgeMs: number = 60000; // 60s gossip staleness cutoff
+  private readonly trustedCaPublicKeys: Set<string> = new Set();
+
+  constructor(trustedCaPublicKeys?: Iterable<string>) {
+    if (trustedCaPublicKeys) {
+      for (const key of trustedCaPublicKeys) {
+        this.trustedCaPublicKeys.add(key);
+      }
+    }
+    // Trust Cascadia Root CA by default
+    this.trustedCaPublicKeys.add(CASCADIA_ROOT_CA.publicKey);
+  }
+
+  /**
+   * Register an authorized Certificate Authority public key as a trust anchor.
+   */
+  public registerTrustedCa(publicKeyHex: string): void {
+    this.trustedCaPublicKeys.add(publicKeyHex.replace(/^0x/, ''));
+  }
 
   /**
    * Ingest and validate signed node capability advertisement from gossipsub.
-   * Enforces CA admission: signature must be present and timestamp non-stale.
+   * 
+   * ENFORCES STRICT CA ADMISSION:
+   * 1. peerId is valid non-empty string.
+   * 2. Timestamp is not stale (< 60s age).
+   * 3. Issuing CA public key is recognized and trusted.
+   * 4. Operator signature is cryptographically verified against CA public key.
+   *    Fabricated or tampered signatures are rejected fail-closed.
    */
   public receiveGossipAdvertisement(ad: NodeCapabilityAd): { success: boolean; reason?: string } {
-    if (!ad || !ad.peerId) {
+    if (!ad || !ad.peerId || typeof ad.peerId !== 'string' || ad.peerId.trim().length === 0) {
       return { success: false, reason: 'Invalid capability advertisement: missing peerId.' };
     }
 
-    if (!ad.operatorSignature || ad.operatorSignature.trim().length === 0) {
+    if (!ad.operatorSignature || typeof ad.operatorSignature !== 'string' || ad.operatorSignature.trim().length === 0) {
       return { success: false, reason: 'Rejected: Missing operator CA signature.' };
     }
 
@@ -64,7 +148,32 @@ export class CascadiaMeshTransport {
       return { success: false, reason: 'Rejected: Gossip advertisement timestamp is stale.' };
     }
 
-    this.knownPeers.set(ad.peerId, ad);
+    const caKey = (ad.caPublicKey || CASCADIA_ROOT_CA.publicKey).replace(/^0x/, '');
+    if (!this.trustedCaPublicKeys.has(caKey)) {
+      return {
+        success: false,
+        reason: 'Rejected: Untrusted or unrecognized Certificate Authority public key.',
+      };
+    }
+
+    // Cryptographically verify CA operator signature over canonical payload
+    const payloadToVerify = getCapabilityAdSigningPayload({
+      peerId: ad.peerId,
+      availableTops: ad.availableTops,
+      maxContextTokens: ad.maxContextTokens,
+      supportedOps: ad.supportedOps,
+      signedTimestamp: ad.signedTimestamp,
+    });
+
+    const isSignatureValid = verifySignature(payloadToVerify, ad.operatorSignature, caKey);
+    if (!isSignatureValid) {
+      return {
+        success: false,
+        reason: 'Rejected: Cryptographic verification failed. CA operator signature is fabricated or invalid.',
+      };
+    }
+
+    this.knownPeers.set(ad.peerId, Object.freeze({ ...ad }));
     return { success: true };
   }
 
@@ -132,7 +241,7 @@ export class CascadiaMeshTransport {
   public resolveTaskAuction(bids: readonly PeerTaskBid[]): PeerTaskBid | undefined {
     if (!bids || bids.length === 0) return undefined;
 
-    // Filter valid bids with sufficient thermal and VRAM headroom
+    // Filter viable bids with sufficient thermal and VRAM headroom
     const viableBids = bids.filter(
       (b) => b.thermalHeadroomPct >= 15 && b.vramAvailableMb >= 2048
     );
