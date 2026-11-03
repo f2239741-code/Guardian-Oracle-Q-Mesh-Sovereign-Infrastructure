@@ -11,7 +11,8 @@ import {
   KeyRound,
   FileCheck2,
   Sparkles,
-  AlertTriangle
+  AlertTriangle,
+  Mail
 } from 'lucide-react';
 import { EXECUTIVE_STRATEGY, FOUNDING_DOCTRINES, IMPLEMENTATION_PHASES } from '../data/reportData';
 import { TabId } from '../types';
@@ -402,6 +403,36 @@ export const DoctrinesView: React.FC<DoctrinesViewProps> = ({ onSelectTab, onOpe
             </div>
           );
         })()}
+      </section>
+
+      {/* Authorship & Architecture Leadership */}
+      <section className="rounded-xl border border-slate-800 bg-slate-900/40 p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5">
+        <div className="flex items-center gap-4">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-cyan-950/80 border border-cyan-800/80 text-cyan-400 font-mono font-bold text-base">
+            GO
+          </div>
+          <div className="space-y-0.5">
+            <div className="text-[11px] font-mono text-cyan-400 uppercase tracking-wider">
+              Architecture & Research Direction
+            </div>
+            <h3 className="text-base font-bold text-slate-100">
+              Kenneth Cripps &amp; Guardian Oracle team
+            </h3>
+            <p className="text-xs text-slate-400">
+              Zero-Trust Decentralized AI Sovereign Infrastructure
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 w-full sm:w-auto">
+          <a
+            href="mailto:kenx@guardianoracle.com"
+            className="flex items-center justify-center gap-2 w-full sm:w-auto px-4 py-2.5 rounded-lg border border-cyan-500/40 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-300 text-xs font-mono font-semibold transition-all hover:border-cyan-400"
+          >
+            <Mail className="h-4 w-4 text-cyan-400 shrink-0" />
+            <span>kenx@guardianoracle.com</span>
+          </a>
+        </div>
       </section>
     </div>
   );

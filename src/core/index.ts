@@ -20,3 +20,5 @@ export * from './policy/TaskPolicyEngine';
 export * from './verification/ProvisoVerificationGate';
 export * from './commit/CommitReceipt';
 export * from './mesh/CascadiaMeshTransport';
+export * from './mesh/SpeculativeBandwidthCalculator';
+export * from './mesh/SecretCanaryDriftDetector';
