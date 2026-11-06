@@ -17,7 +17,10 @@ import {
   canonicalizeJson,
   verifySignature,
   signPayload,
+  assertKeyNotCompromised,
+  isKeyCompromised,
   CASCADIA_ROOT_CA,
+  KeyPair,
 } from '../crypto/cryptoUtils';
 
 export interface NodeCapabilityAd {
@@ -73,9 +76,26 @@ export function createSignedNodeCapabilityAd(
     supportedOps: readonly string[];
     signedTimestamp?: number;
   },
-  caPrivateKey: string = CASCADIA_ROOT_CA.privateKey,
-  caPublicKey: string = CASCADIA_ROOT_CA.publicKey
+  caSignerOrPrivateKey?: KeyPair | string,
+  caPublicKeyParam?: string
 ): NodeCapabilityAd {
+  let caPrivateKey: string;
+  let caPublicKey: string;
+
+  if (caSignerOrPrivateKey && typeof caSignerOrPrivateKey === 'object' && 'privateKey' in caSignerOrPrivateKey) {
+    caPrivateKey = caSignerOrPrivateKey.privateKey;
+    caPublicKey = caSignerOrPrivateKey.publicKey;
+  } else if (typeof caSignerOrPrivateKey === 'string') {
+    caPrivateKey = caSignerOrPrivateKey;
+    caPublicKey = caPublicKeyParam || CASCADIA_ROOT_CA.publicKey;
+  } else {
+    caPrivateKey = CASCADIA_ROOT_CA.privateKey;
+    caPublicKey = CASCADIA_ROOT_CA.publicKey;
+  }
+
+  assertKeyNotCompromised(caPrivateKey, 'Cascadia CA private key');
+  assertKeyNotCompromised(caPublicKey, 'Cascadia CA public key');
+
   const signedTimestamp = params.signedTimestamp ?? Date.now();
   const payloadToSign = getCapabilityAdSigningPayload({
     peerId: params.peerId,
@@ -110,18 +130,28 @@ export class CascadiaMeshTransport {
   constructor(trustedCaPublicKeys?: Iterable<string>) {
     if (trustedCaPublicKeys) {
       for (const key of trustedCaPublicKeys) {
-        this.trustedCaPublicKeys.add(key);
+        this.registerTrustedCa(key);
       }
+    } else {
+      // Trust active Cascadia Root CA public key by default
+      this.registerTrustedCa(CASCADIA_ROOT_CA.publicKey);
     }
-    // Trust Cascadia Root CA by default
-    this.trustedCaPublicKeys.add(CASCADIA_ROOT_CA.publicKey);
   }
 
   /**
    * Register an authorized Certificate Authority public key as a trust anchor.
    */
   public registerTrustedCa(publicKeyHex: string): void {
-    this.trustedCaPublicKeys.add(publicKeyHex.replace(/^0x/, ''));
+    const clean = publicKeyHex.replace(/^0x/, '').toLowerCase();
+    assertKeyNotCompromised(clean, 'Cascadia CA public key');
+    this.trustedCaPublicKeys.add(clean);
+  }
+
+  /**
+   * Return configured trusted CA public keys.
+   */
+  public getTrustedCaPublicKeys(): ReadonlySet<string> {
+    return this.trustedCaPublicKeys;
   }
 
   /**
@@ -133,6 +163,7 @@ export class CascadiaMeshTransport {
    * 3. Issuing CA public key is recognized and trusted.
    * 4. Operator signature is cryptographically verified against CA public key.
    *    Fabricated or tampered signatures are rejected fail-closed.
+   * 5. Revoked or compromised keys are strictly rejected.
    */
   public receiveGossipAdvertisement(ad: NodeCapabilityAd): { success: boolean; reason?: string } {
     if (!ad || !ad.peerId || typeof ad.peerId !== 'string' || ad.peerId.trim().length === 0) {
@@ -148,7 +179,14 @@ export class CascadiaMeshTransport {
       return { success: false, reason: 'Rejected: Gossip advertisement timestamp is stale.' };
     }
 
-    const caKey = (ad.caPublicKey || CASCADIA_ROOT_CA.publicKey).replace(/^0x/, '');
+    const caKey = (ad.caPublicKey || CASCADIA_ROOT_CA.publicKey).replace(/^0x/, '').toLowerCase();
+    if (isKeyCompromised(caKey)) {
+      return {
+        success: false,
+        reason: 'Rejected: Certificate Authority key has been revoked or compromised.',
+      };
+    }
+
     if (!this.trustedCaPublicKeys.has(caKey)) {
       return {
         success: false,

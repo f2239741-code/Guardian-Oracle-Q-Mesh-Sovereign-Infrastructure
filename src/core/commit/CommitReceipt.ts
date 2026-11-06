@@ -24,7 +24,10 @@ import {
   canonicalizeJson,
   signPayload,
   verifySignature,
+  assertKeyNotCompromised,
+  isKeyCompromised,
   SOVEREIGN_ROOT_AUTHORITY,
+  KeyPair,
 } from '../crypto/cryptoUtils';
 
 /**
@@ -98,9 +101,26 @@ export function createSignedAuthorizationRef(
     grantId: string;
     principalId: string;
   },
-  privateKey: string = SOVEREIGN_ROOT_AUTHORITY.privateKey,
-  publicKey: string = SOVEREIGN_ROOT_AUTHORITY.publicKey
+  signerOrPrivateKey?: KeyPair | string,
+  publicKeyParam?: string
 ): SovereignAuthorizationRef {
+  let privateKey: string;
+  let publicKey: string;
+
+  if (signerOrPrivateKey && typeof signerOrPrivateKey === 'object' && 'privateKey' in signerOrPrivateKey) {
+    privateKey = signerOrPrivateKey.privateKey;
+    publicKey = signerOrPrivateKey.publicKey;
+  } else if (typeof signerOrPrivateKey === 'string') {
+    privateKey = signerOrPrivateKey;
+    publicKey = publicKeyParam || SOVEREIGN_ROOT_AUTHORITY.publicKey;
+  } else {
+    privateKey = SOVEREIGN_ROOT_AUTHORITY.privateKey;
+    publicKey = SOVEREIGN_ROOT_AUTHORITY.publicKey;
+  }
+
+  assertKeyNotCompromised(privateKey, 'authorization ref signing private key');
+  assertKeyNotCompromised(publicKey, 'authorization ref principal public key');
+
   const payload = getAuthorizationRefSigningPayload(params);
   const authorizationSignature = signPayload(payload, privateKey);
   return {
@@ -183,12 +203,29 @@ export class CommitReceiptBuilder {
   }
 
   /**
-   * Finalizes and digitally signs the portable CommitReceipt using the sovereign authority's private key.
+   * Finalizes and digitally signs the portable CommitReceipt using a sovereign authority keypair.
    */
   public signAndBuild(
-    authorityPrivateKey: string = SOVEREIGN_ROOT_AUTHORITY.privateKey,
-    authorizingPublicKey: string = SOVEREIGN_ROOT_AUTHORITY.publicKey
+    signerOrPrivateKey?: KeyPair | string,
+    authorizingPublicKeyParam?: string
   ): CommitReceipt {
+    let authorityPrivateKey: string;
+    let authorizingPublicKey: string;
+
+    if (signerOrPrivateKey && typeof signerOrPrivateKey === 'object' && 'privateKey' in signerOrPrivateKey) {
+      authorityPrivateKey = signerOrPrivateKey.privateKey;
+      authorizingPublicKey = signerOrPrivateKey.publicKey;
+    } else if (typeof signerOrPrivateKey === 'string') {
+      authorityPrivateKey = signerOrPrivateKey;
+      authorizingPublicKey = authorizingPublicKeyParam || SOVEREIGN_ROOT_AUTHORITY.publicKey;
+    } else {
+      authorityPrivateKey = SOVEREIGN_ROOT_AUTHORITY.privateKey;
+      authorizingPublicKey = SOVEREIGN_ROOT_AUTHORITY.publicKey;
+    }
+
+    assertKeyNotCompromised(authorityPrivateKey, 'commit receipt authority private key');
+    assertKeyNotCompromised(authorizingPublicKey, 'commit receipt authorizing public key');
+
     if (!this.evidence) {
       throw new Error("CommitReceipt requires valid ExecutionEvidence.");
     }
@@ -235,14 +272,38 @@ export class CommitReceiptBuilder {
   }
 
   /**
-   * Cryptographically verifies both:
+   * Cryptographically verifies:
    * 1. Content-addressed SHA-256 hash integrity of receipt payload.
    * 2. Sovereign authority digital signature over receiptId.
    * 3. Authorizing principal digital signature on the nested authorization ref.
+   * 4. Optional check that authorizingPublicKey is in trustedPublicKeys.
+   * 5. Validates that no involved keys are in the compromised blacklist.
    */
-  public static verifyReceiptIntegrity(receipt: CommitReceipt): boolean {
+  public static verifyReceiptIntegrity(
+    receipt: CommitReceipt,
+    trustedPublicKeys?: Iterable<string>
+  ): boolean {
     if (!receipt || !receipt.receiptId || !receipt.authoritySignature || !receipt.authorizingPublicKey) {
       return false;
+    }
+
+    const cleanAuthPub = receipt.authorizingPublicKey.replace(/^0x/, '').toLowerCase();
+    if (isKeyCompromised(cleanAuthPub)) {
+      return false;
+    }
+
+    if (receipt.authorization && receipt.authorization.principalPublicKey) {
+      const cleanPrincipalPub = receipt.authorization.principalPublicKey.replace(/^0x/, '').toLowerCase();
+      if (isKeyCompromised(cleanPrincipalPub)) {
+        return false;
+      }
+    }
+
+    if (trustedPublicKeys) {
+      const trustedSet = new Set(Array.from(trustedPublicKeys).map(k => k.replace(/^0x/, '').toLowerCase()));
+      if (trustedSet.size > 0 && !trustedSet.has(cleanAuthPub)) {
+        return false; // Signer public key is not an enrolled sovereign authority
+      }
     }
 
     // 1. Verify content-addressed payload hash

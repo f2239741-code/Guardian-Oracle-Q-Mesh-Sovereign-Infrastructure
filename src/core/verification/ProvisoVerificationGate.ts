@@ -23,7 +23,9 @@ import {
   canonicalizeJson,
   verifySignature,
   signPayload,
+  assertKeyNotCompromised,
   SOVEREIGN_ROOT_AUTHORITY,
+  KeyPair,
 } from '../crypto/cryptoUtils';
 
 export interface CandidateAction {
@@ -107,9 +109,26 @@ export function createSignedAuthorizationEvent(
     authorizedOp: string;
     issuedAt?: number;
   },
-  privateKey: string = SOVEREIGN_ROOT_AUTHORITY.privateKey,
-  publicKey: string = SOVEREIGN_ROOT_AUTHORITY.publicKey
+  signerOrPrivateKey?: KeyPair | string,
+  publicKeyParam?: string
 ): SignedAuthorizationEvent {
+  let privateKey: string;
+  let publicKey: string;
+
+  if (signerOrPrivateKey && typeof signerOrPrivateKey === 'object' && 'privateKey' in signerOrPrivateKey) {
+    privateKey = signerOrPrivateKey.privateKey;
+    publicKey = signerOrPrivateKey.publicKey;
+  } else if (typeof signerOrPrivateKey === 'string') {
+    privateKey = signerOrPrivateKey;
+    publicKey = publicKeyParam || SOVEREIGN_ROOT_AUTHORITY.publicKey;
+  } else {
+    privateKey = SOVEREIGN_ROOT_AUTHORITY.privateKey;
+    publicKey = SOVEREIGN_ROOT_AUTHORITY.publicKey;
+  }
+
+  assertKeyNotCompromised(privateKey, 'authorization event signing private key');
+  assertKeyNotCompromised(publicKey, 'authorization event principal public key');
+
   const issuedAt = params.issuedAt ?? Date.now();
   const payloadToSign = getAuthorizationEventSigningPayload({
     eventId: params.eventId,
@@ -137,7 +156,32 @@ export class ProvisoVerificationGate {
   private readonly ledger: LedgerEntry[] = [];
   private readonly eventsById: Map<string, SignedAuthorizationEvent> = new Map();
   private readonly revokedEventIds: Set<string> = new Set();
+  private readonly trustedPublicKeys: Set<string> = new Set();
   private readonly GENESIS_PREV_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
+
+  constructor(trustedAuthorityPublicKeys?: Iterable<string>) {
+    if (trustedAuthorityPublicKeys) {
+      for (const key of trustedAuthorityPublicKeys) {
+        this.registerTrustedAuthority(key);
+      }
+    } else {
+      // By default, enroll the active sovereign root authority public key
+      this.registerTrustedAuthority(SOVEREIGN_ROOT_AUTHORITY.publicKey);
+    }
+  }
+
+  /**
+   * Register a trusted Sovereign Authority public key as a verification anchor.
+   */
+  public registerTrustedAuthority(publicKeyHex: string): void {
+    const clean = publicKeyHex.replace(/^0x/, '').toLowerCase();
+    assertKeyNotCompromised(clean, 'sovereign authority public key');
+    this.trustedPublicKeys.add(clean);
+  }
+
+  public getTrustedAuthorities(): ReadonlySet<string> {
+    return this.trustedPublicKeys;
+  }
 
   /**
    * Append a cryptographically signed authorization event to the immutable append-only ledger.
@@ -145,6 +189,7 @@ export class ProvisoVerificationGate {
    * 1. Immutability: duplicate eventIds are strictly rejected.
    * 2. Cryptographic Verification: digital signature must verify against principalPublicKey.
    * 3. Chaining: links to previous entry hash.
+   * 4. Trust Anchor Check: principalPublicKey must be enrolled and not compromised.
    */
   public appendAuthorizationEvent(event: SignedAuthorizationEvent): void {
     if (!event || !event.eventId) {
@@ -157,6 +202,15 @@ export class ProvisoVerificationGate {
 
     if (!event.principalPublicKey || !event.principalSignature) {
       throw new Error('Cryptographic rejection: Authorization event missing principal public key or digital signature.');
+    }
+
+    const cleanPrincipalKey = event.principalPublicKey.replace(/^0x/, '').toLowerCase();
+    assertKeyNotCompromised(cleanPrincipalKey, 'event principal public key');
+
+    if (this.trustedPublicKeys.size > 0 && !this.trustedPublicKeys.has(cleanPrincipalKey)) {
+      throw new Error(
+        `Cryptographic rejection: Principal public key ${cleanPrincipalKey.slice(0, 16)}... is not an enrolled sovereign authority.`
+      );
     }
 
     // Cryptographically verify digital signature over canonical payload
@@ -218,6 +272,16 @@ export class ProvisoVerificationGate {
 
     if (this.revokedEventIds.has(targetEventId)) {
       return true; // Already revoked
+    }
+
+    const cleanRevokerPub = revokingPublicKey.replace(/^0x/, '').toLowerCase();
+    assertKeyNotCompromised(cleanRevokerPub, 'revoking authority public key');
+    assertKeyNotCompromised(revokingPrivateKey, 'revoking authority private key');
+
+    if (this.trustedPublicKeys.size > 0 && !this.trustedPublicKeys.has(cleanRevokerPub)) {
+      throw new Error(
+        `Cryptographic rejection: Revoking public key ${cleanRevokerPub.slice(0, 16)}... is not an enrolled sovereign authority.`
+      );
     }
 
     const revokedAt = Date.now();
@@ -366,6 +430,15 @@ export class ProvisoVerificationGate {
       matchedEvent.principalSignature,
       matchedEvent.principalPublicKey
     );
+
+    const cleanMatchedPub = matchedEvent.principalPublicKey.replace(/^0x/, '').toLowerCase();
+    if (this.trustedPublicKeys.size > 0 && !this.trustedPublicKeys.has(cleanMatchedPub)) {
+      return {
+        valid: false,
+        reason: `REJECTED: Principal public key on event '${matchedEvent.eventId}' is not an enrolled sovereign authority.`,
+        verifiedAt: nowIso,
+      };
+    }
 
     if (!isSigValid) {
       return {

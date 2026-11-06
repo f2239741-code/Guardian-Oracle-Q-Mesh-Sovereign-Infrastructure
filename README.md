@@ -84,7 +84,7 @@ The implementation is organized into six core modules spanning four architectura
 
 ---
 
-## Cryptographic Hardening & Security Controls
+## Cryptographic Hardening & Sovereign Key Architecture (Incision 007 / G-O-07)
 
 1. **PROVISO Cryptographic Signature Verification (`ProvisoVerificationGate.ts`)**:
    - Every authorization event's digital signature is verified against the principal's registered public key using Secp256k1 Schnorr cryptography.
@@ -103,16 +103,24 @@ The implementation is organized into six core modules spanning four architectura
    - `issueGrant()` requires an explicit `SovereignAuthorizationEventRef` (authority cannot be manufactured from memory).
    - `evaluateAccess()` strictly mandates `recipientAgentId` and verifies it against `downstreamPropagationScope` (fail-closed if omitted).
 
+5. **Secret Boundary & Sovereign Key Invariants (Incision 007)**:
+   - **Hard Client-Side Fail-Closed (`REQ-2`)**: `loadPrivateKeyFromEnv()` inspects the runtime environment and unconditionally throws a `SecurityError` if evaluated within a browser context (`window`/`document` present). Client applications never ingest or load production private keys.
+   - **Strict Production Mode (`REQ-5 / REQ-7`)**: `SovereignAuthorityManager` supports `STRICT_SOVEREIGN_MODE`. In production or strict mode, missing sovereign credentials immediately throw a `FatalConfigurationError`, completely preventing silent fallback to ephemeral demonstration authorities.
+   - **Zero Raw Private Key Material in Bundles (`REQ-1 / REQ-8`)**: All historical compromised private scalars have been completely purged from source code and replaced with one-way SHA-256 digests in `COMPROMISED_PRIVATE_KEY_HASHES`. Production Vite builds emit zero private scalars or seed phrases.
+   - **Air-Gapped Keygen CLI (`REQ-9`)**: `scripts/keygen.ts` (`npm run keygen`) provides an audited, zero-dependency offline CLI tool for Secp256k1 key ceremonies with automatic blacklist cross-checks, fingerprint generation, and formatted secret manager exports.
+   - **Operational Runbook (`docs/key_rotation_runbook.md`)**: Full operational documentation detailing air-gapped ceremonies, secret manager injection (GCP, Vault, AWS), zero-downtime overlapping dual-key rotation, and emergency revocation protocols.
+
 ---
 
 ## Verification & Build Status
 
-The repository has undergone automated test verification and production compilation checks:
+The repository has undergone rigorous automated testing, secret bundle scanning, and type verification:
 
-* **Automated Test Suite**: `52 passing assertions` across 10 test suites (`0 failures`, `0 skipped`).
+* **Automated Test Suite**: `62 passing assertions` across 11 test suites (`0 failures`, `0 skipped`).
 * **TypeScript Type Safety**: Clean `tsc --noEmit` check with `0 errors`.
-* **Production Compilation**: Production `Vite` bundle compiles cleanly without errors or warnings.
-* **Interactive Workbenches**: Live execution workbenches (`Phase004AView`, `Phase003HView`, `Phase004BView`, `Phase004CView`, `PipelineSimulatorModal`) integrated directly into the console UI.
+* **Production Compilation**: Clean `vite build` without errors or warnings.
+* **Client Bundle Inspection**: Zero raw private scalars or seed strings found in compiled `dist/assets/index-*.js`.
+* **Interactive Workbenches**: Live execution workbenches (`Phase004AView`, `Phase003HView`, `Phase004BView`, `Phase004CView`, `PipelineSimulatorModal`) integrated into the console UI with real-time key sovereignty telemetry.
 
 ---
 
@@ -124,7 +132,7 @@ The repository has undergone automated test verification and production compilat
 # Install dependencies
 npm install
 
-# Run the full automated test suite (52 assertions across 10 test suites)
+# Run the full automated test suite (62 assertions across 11 test suites)
 npm test
 
 # Run TypeScript type check
@@ -132,11 +140,19 @@ npm run typecheck
 
 # Build production bundle
 npm run build
+
+# Generate sovereign keypairs out-of-band (REQ-9)
+npm run keygen all
 ```
 
 ---
 
-## License
+## Sovereign Key Governance & Contact
+
+**Guardian Oracle / Q-Mesh Sovereign Infrastructure**  
+Kenneth Cripps & Guardian Oracle team  
+Email: [kenx@guardianoracle.com](mailto:kenx@guardianoracle.com)  
 
 Developed under the **Guardian Oracle Sovereign License**.  
-*Compute can migrate. State remains sovereign.*
+*Knowledge can propagate. Privilege cannot. Compute can migrate. State remains sovereign.*
+

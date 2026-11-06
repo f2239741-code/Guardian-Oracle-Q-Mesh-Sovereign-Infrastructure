@@ -302,9 +302,9 @@ describe('Module 3: Verification Gate — PROVISO Authorization Gate', () => {
     policy.issueGrant('db:financial/ledger', ['commit_transaction'], ['agent-1'], sampleAuthRef, 300);
 
     const attackerKey = generateKeyPair('attacker_seed_77');
-    // Attempting to inject an authorization event with a fabricated signature
-    const forgedEvent: SignedAuthorizationEvent = {
-      eventId: 'evt-forged-01',
+    // 1. Attempting to inject an authorization event with an unenrolled attacker key
+    const unenrolledEvent: SignedAuthorizationEvent = {
+      eventId: 'evt-unenrolled-01',
       principalId: 'did:mesh:authority-sovereign',
       principalPublicKey: attackerKey.publicKey,
       principalSignature: 'sig:schnorr:0000000000000000000000000000000000000000000000000000000000000001:0000000000000000000000000000000000000000000000000000000000000001',
@@ -313,10 +313,30 @@ describe('Module 3: Verification Gate — PROVISO Authorization Gate', () => {
       issuedAt: Date.now(),
     };
 
-    // Appending an event with a fake/invalid signature must be rejected at ingestion
     assert.throws(
       () => {
-        gate.appendAuthorizationEvent(forgedEvent);
+        gate.appendAuthorizationEvent(unenrolledEvent);
+      },
+      (err: Error) => {
+        assert.match(err.message, /not an enrolled sovereign authority/);
+        return true;
+      }
+    );
+
+    // 2. Attempting to inject a forged signature under an enrolled authority key
+    const forgedSignatureEvent: SignedAuthorizationEvent = {
+      eventId: 'evt-forged-02',
+      principalId: 'did:mesh:authority-sovereign',
+      principalPublicKey: SOVEREIGN_ROOT_AUTHORITY.publicKey,
+      principalSignature: 'sig:schnorr:0000000000000000000000000000000000000000000000000000000000000001:0000000000000000000000000000000000000000000000000000000000000001',
+      authorizedResource: 'db:financial/ledger',
+      authorizedOp: 'commit_transaction',
+      issuedAt: Date.now(),
+    };
+
+    assert.throws(
+      () => {
+        gate.appendAuthorizationEvent(forgedSignatureEvent);
       },
       (err: Error) => {
         assert.match(err.message, /Invalid digital signature/);

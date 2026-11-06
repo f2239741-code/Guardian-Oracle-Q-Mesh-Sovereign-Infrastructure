@@ -216,6 +216,110 @@ export interface KeyPair {
   readonly publicKey: string;  // 66-hex compressed public key (02/03 + x)
 }
 
+export interface EphemeralKeyPair extends KeyPair {
+  readonly isEphemeral: true;
+  readonly label: string;
+  readonly createdAt: number;
+}
+
+// ============================================================================
+// 4. Compromised Key Registry & Blacklist (Audit Remediation)
+// ============================================================================
+
+/**
+ * Historical seed strings previously committed to the repository.
+ * These seeds are permanently REVOKED and BLACKLISTED.
+ */
+export const COMPROMISED_STATIC_SEEDS: readonly string[] = Object.freeze([
+  'guardian_oracle_sovereign_root_master_seed_2026',
+  'cascadia_mesh_root_certificate_authority_seed_2026',
+  'operator_node_alpha_mesh_certified_seed_2026',
+]);
+
+/**
+ * Public keys derived from historical exposed seeds.
+ * These public keys must NEVER be accepted as trust anchors or valid signers.
+ */
+export const COMPROMISED_PUBLIC_KEYS: ReadonlySet<string> = new Set([
+  '0245ea2d6fa457c487ae91ea42534a331ec69e56751b011e114b129fe077e53056', // Historical Sovereign Root
+  '0349666d6af4c0096bd969a0a79cc5d968b34c076cff554c8e9f62835a07f7583f', // Historical Cascadia Root CA
+  '023a8a4d9f70b25acf7496e41f28e197dfcce591585edbca652900128cf2eee08c', // Historical Operator Alpha
+]);
+
+/**
+ * SHA-256 digests of private key scalars derived from historical exposed seeds.
+ * NOTE: Raw private key scalars are NEVER stored or emitted into client bundles.
+ */
+export const COMPROMISED_PRIVATE_KEY_HASHES: ReadonlySet<string> = new Set([
+  // SHA-256 digests of actual Secp256k1 private scalars derived from historical exposed seeds
+  'bdd8e912df36180281f35b77c22af0796f552c10c51ecc5892bd4e72c8238b7d', // Historical sovereign root scalar hash
+  'ecc3385f99efce08219194a96b9736c0148e1026b4107b0dcfebfbdd15a62a84', // Historical Cascadia CA scalar hash
+  'd6753bd0a732fb0bde7e7947f849f4a376058f4601d502d10064cb80b84a5d8c', // Historical operator alpha scalar hash
+  // SHA-256 digests of intermediate raw seed digests
+  'fb0e621b3ced1116799478d97278e06b57aa081f071e39ffa6b4d1a7408cba31',
+  '5417335b5186a9e5b57d1535dd6255d7970857d1737bf3334189422015e6ca10',
+  '557d23e7ad9d0adb069dadbbc99a05276d40aa634c89437ea17841f252f7fe5a',
+]);
+
+export class CompromisedKeyError extends Error {
+  constructor(message: string) {
+    super(`[CRITICAL SECURITY ALERT - COMPROMISED KEY]: ${message}`);
+    this.name = 'CompromisedKeyError';
+  }
+}
+
+export class SecurityError extends Error {
+  constructor(message: string) {
+    super(`[SECURITY BOUNDARY ERROR]: ${message}`);
+    this.name = 'SecurityError';
+  }
+}
+
+export class FatalConfigurationError extends Error {
+  constructor(message: string) {
+    super(`[FATAL SOVEREIGN CONFIGURATION ERROR]: ${message}`);
+    this.name = 'FatalConfigurationError';
+  }
+}
+
+/**
+ * Checks whether a public or private key has been revoked/compromised.
+ * Private keys are verified by comparing their SHA-256 digest against the blacklist.
+ */
+export function isKeyCompromised(keyHex: string): boolean {
+  if (!keyHex) return false;
+  const clean = keyHex.replace(/^0x/, '').toLowerCase();
+  if (COMPROMISED_PUBLIC_KEYS.has(clean)) {
+    return true;
+  }
+  const keyHash = computeSha256(clean);
+  return COMPROMISED_PRIVATE_KEY_HASHES.has(keyHash);
+}
+
+/**
+ * Asserts that a key has not been revoked or compromised.
+ */
+export function assertKeyNotCompromised(keyHex: string, roleDescription: string = 'key'): void {
+  const clean = keyHex.replace(/^0x/, '').toLowerCase();
+  if (isKeyCompromised(clean)) {
+    throw new CompromisedKeyError(
+      `Attempted to use compromised/revoked historical key for ${roleDescription}. This key was exposed in historical repository commits and is permanently invalidated.`
+    );
+  }
+}
+
+/**
+ * Generates cryptographically secure 256-bit random entropy using CSPRNG.
+ */
+export function generateSecureEntropy(): Uint8Array {
+  const bytes = new Uint8Array(32);
+  if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+    globalThis.crypto.getRandomValues(bytes);
+    return bytes;
+  }
+  throw new Error('CSPRNG unavailable: cannot generate secure cryptographic keys without entropy source.');
+}
+
 /**
  * Derives the compressed public key from a private key.
  */
@@ -231,16 +335,264 @@ export function getPublicKeyFromPrivate(privateKeyHex: string): string {
 }
 
 /**
- * Generate a deterministically reproducible or entropy-seeded Secp256k1 key pair.
+ * Generates an ephemeral in-memory Secp256k1 keypair using 256 bits of CSPRNG entropy.
+ * Keys generated here are never committed or persisted across sessions.
  */
-export function generateKeyPair(seedText?: string): KeyPair {
-  const seed = seedText || `seed_${Date.now()}_${Math.random()}`;
-  const privHash = computeSha256(seed);
-  const privScalar = mod(BigInt('0x' + privHash), CURVE_N - 2n) + 1n;
+export function createEphemeralKeyPair(label: string = 'ephemeral-session-key'): EphemeralKeyPair {
+  const entropy = generateSecureEntropy();
+  const hex = Array.from(entropy).map(b => b.toString(16).padStart(2, '0')).join('');
+  const privScalar = mod(BigInt('0x' + hex), CURVE_N - 2n) + 1n;
   const privateKey = privScalar.toString(16).padStart(64, '0');
   const publicKey = getPublicKeyFromPrivate(privateKey);
-  return { privateKey, publicKey };
+  return {
+    privateKey,
+    publicKey,
+    isEphemeral: true,
+    label,
+    createdAt: Date.now(),
+  };
 }
+
+/**
+ * Generates a cryptographically secure key pair via CSPRNG.
+ */
+export function generateSecureKeyPair(): KeyPair {
+  return createEphemeralKeyPair('secure-csprng-key');
+}
+
+/**
+ * Generate a Secp256k1 key pair.
+ * In production or default mode: generates using CSPRNG.
+ * If seedText is provided for deterministic testing, verifies seed is NOT in the compromised blacklist.
+ */
+export function generateKeyPair(seedText?: string): KeyPair {
+  if (seedText) {
+    if (COMPROMISED_STATIC_SEEDS.includes(seedText)) {
+      throw new CompromisedKeyError(
+        `Seed "${seedText}" is a known compromised historical seed committed to source control and is permanently blacklisted.`
+      );
+    }
+    const privHash = computeSha256(seedText);
+    const privScalar = mod(BigInt('0x' + privHash), CURVE_N - 2n) + 1n;
+    const privateKey = privScalar.toString(16).padStart(64, '0');
+    assertKeyNotCompromised(privateKey, 'generated private key');
+    const publicKey = getPublicKeyFromPrivate(privateKey);
+    return { privateKey, publicKey };
+  }
+  return generateSecureKeyPair();
+}
+
+/**
+ * Loads a private key from external environment variables.
+ * 
+ * STRICT CLIENT-SERVER BOUNDARY (REQ-2):
+ * - Private key loading is strictly forbidden in browser/client runtimes.
+ * - In browser runtimes (where window, document, or navigator are present), this function
+ *   immediately FAILS CLOSED by throwing a SecurityError.
+ * - Only server-side runtimes (Node.js/Bun) can access process.env.
+ * - Client-side import.meta.env access for private keys is completely eliminated.
+ */
+export function loadPrivateKeyFromEnv(envVarName: string): KeyPair | null {
+  // Fail closed if executed in browser context
+  if (typeof window !== 'undefined' || typeof document !== 'undefined') {
+    throw new SecurityError(
+      `[SECURITY BOUNDARY VIOLATION]: Attempted to load private key from environment variable '${envVarName}' inside a client/browser runtime. Private keys must never be loaded, stored, or accessed client-side.`
+    );
+  }
+
+  // Server-side environment resolution only
+  if (typeof process === 'undefined' || !process.env) {
+    return null;
+  }
+
+  const rawValue = process.env[envVarName];
+  if (!rawValue) return null;
+
+  const clean = rawValue.trim().replace(/^0x/, '').toLowerCase();
+  if (clean.length !== 64 || !/^[0-9a-f]{64}$/.test(clean)) {
+    throw new Error(`Environment variable ${envVarName} must contain a 64-character hex private key scalar.`);
+  }
+
+  assertKeyNotCompromised(clean, `environment variable ${envVarName}`);
+  const publicKey = getPublicKeyFromPrivate(clean);
+  return { privateKey: clean, publicKey };
+}
+
+// ============================================================================
+// 5. Sovereign Key Authority Manager (Runtime Secret Decoupling)
+// ============================================================================
+
+export class SovereignAuthorityManager {
+  private static sovereignAuthority: KeyPair | null = null;
+  private static cascadiaCa: KeyPair | null = null;
+  private static operatorAlpha: KeyPair | null = null;
+  private static strictProductionMode: boolean = false;
+
+  /**
+   * Returns true if running in production mode or strict sovereign enforcement mode.
+   */
+  public static isStrictMode(): boolean {
+    if (this.strictProductionMode) return true;
+    if (typeof process !== 'undefined' && process.env) {
+      if (process.env.NODE_ENV === 'production' || process.env.STRICT_SOVEREIGN_MODE === 'true') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Programmatically configure strict production mode.
+   */
+  public static setStrictMode(enabled: boolean): void {
+    this.strictProductionMode = enabled;
+  }
+
+  public static getSovereignRootAuthority(): KeyPair {
+    if (this.sovereignAuthority) {
+      return this.sovereignAuthority;
+    }
+
+    // In client/browser contexts:
+    if (typeof window !== 'undefined' || typeof document !== 'undefined') {
+      if (this.isStrictMode()) {
+        throw new FatalConfigurationError(
+          'Browser client runtime cannot host sovereign root private keys in production/strict mode. Authority signing must occur server-side or via an isolated signing enclave.'
+        );
+      }
+      this.sovereignAuthority = createEphemeralKeyPair('Ephemeral Client Sandbox Authority');
+      return this.sovereignAuthority;
+    }
+
+    // Server-side context:
+    const envKey = loadPrivateKeyFromEnv('SOVEREIGN_ROOT_PRIVATE_KEY');
+    if (envKey) {
+      this.sovereignAuthority = envKey;
+      return envKey;
+    }
+
+    // FAIL CLOSED in production:
+    if (this.isStrictMode()) {
+      throw new FatalConfigurationError(
+        'Missing required SOVEREIGN_ROOT_PRIVATE_KEY secret in production/strict mode. Silent fallback to ephemeral demonstration authorities is strictly forbidden.'
+      );
+    }
+
+    // Non-production test/sandbox fallback
+    this.sovereignAuthority = createEphemeralKeyPair('Ephemeral Sovereign Root Authority');
+    return this.sovereignAuthority;
+  }
+
+  public static getCascadiaRootCa(): KeyPair {
+    if (this.cascadiaCa) {
+      return this.cascadiaCa;
+    }
+
+    if (typeof window !== 'undefined' || typeof document !== 'undefined') {
+      if (this.isStrictMode()) {
+        throw new FatalConfigurationError(
+          'Browser client runtime cannot host Cascadia Root CA private keys in production/strict mode.'
+        );
+      }
+      this.cascadiaCa = createEphemeralKeyPair('Ephemeral Client Cascadia CA');
+      return this.cascadiaCa;
+    }
+
+    const envKey = loadPrivateKeyFromEnv('CASCADIA_CA_PRIVATE_KEY');
+    if (envKey) {
+      this.cascadiaCa = envKey;
+      return envKey;
+    }
+
+    if (this.isStrictMode()) {
+      throw new FatalConfigurationError(
+        'Missing required CASCADIA_CA_PRIVATE_KEY secret in production/strict mode. Silent fallback to ephemeral demonstration authorities is strictly forbidden.'
+      );
+    }
+
+    this.cascadiaCa = createEphemeralKeyPair('Ephemeral Cascadia Root CA');
+    return this.cascadiaCa;
+  }
+
+  public static getOperatorAlpha(): KeyPair {
+    if (this.operatorAlpha) {
+      return this.operatorAlpha;
+    }
+
+    if (typeof window !== 'undefined' || typeof document !== 'undefined') {
+      if (this.isStrictMode()) {
+        throw new FatalConfigurationError(
+          'Browser client runtime cannot host Operator Alpha private keys in production/strict mode.'
+        );
+      }
+      this.operatorAlpha = createEphemeralKeyPair('Ephemeral Client Operator Alpha');
+      return this.operatorAlpha;
+    }
+
+    const envKey = loadPrivateKeyFromEnv('OPERATOR_NODE_ALPHA_PRIVATE_KEY');
+    if (envKey) {
+      this.operatorAlpha = envKey;
+      return envKey;
+    }
+
+    if (this.isStrictMode()) {
+      throw new FatalConfigurationError(
+        'Missing required OPERATOR_NODE_ALPHA_PRIVATE_KEY secret in production/strict mode.'
+      );
+    }
+
+    this.operatorAlpha = createEphemeralKeyPair('Ephemeral Operator Alpha');
+    return this.operatorAlpha;
+  }
+
+  public static setSovereignRootAuthority(keyPair: KeyPair | null): void {
+    if (keyPair) {
+      assertKeyNotCompromised(keyPair.privateKey, 'sovereign root private key');
+      assertKeyNotCompromised(keyPair.publicKey, 'sovereign root public key');
+    }
+    this.sovereignAuthority = keyPair;
+  }
+
+  public static setCascadiaRootCa(keyPair: KeyPair | null): void {
+    if (keyPair) {
+      assertKeyNotCompromised(keyPair.privateKey, 'Cascadia CA private key');
+      assertKeyNotCompromised(keyPair.publicKey, 'Cascadia CA public key');
+    }
+    this.cascadiaCa = keyPair;
+  }
+
+  public static resetAuthorities(): void {
+    this.sovereignAuthority = null;
+    this.cascadiaCa = null;
+    this.operatorAlpha = null;
+    this.strictProductionMode = false;
+  }
+}
+
+/**
+ * Dynamic proxies to active Sovereign Authorities (backed by environment or fresh CSPRNG session keys).
+ * NEVER hardcoded to static committed seeds.
+ */
+export const SOVEREIGN_ROOT_AUTHORITY: KeyPair = new Proxy({} as KeyPair, {
+  get(_target, prop) {
+    const active = SovereignAuthorityManager.getSovereignRootAuthority();
+    return (active as any)[prop];
+  }
+});
+
+export const CASCADIA_ROOT_CA: KeyPair = new Proxy({} as KeyPair, {
+  get(_target, prop) {
+    const active = SovereignAuthorityManager.getCascadiaRootCa();
+    return (active as any)[prop];
+  }
+});
+
+export const OPERATOR_NODE_ALPHA: KeyPair = new Proxy({} as KeyPair, {
+  get(_target, prop) {
+    const active = SovereignAuthorityManager.getOperatorAlpha();
+    return (active as any)[prop];
+  }
+});
 
 /**
  * Decompresses a 66-character compressed public key into a curve point (x, y).
@@ -251,6 +603,9 @@ function decompressPublicKey(publicKeyHex: string): CurvePoint {
     throw new Error(`Invalid compressed public key length: expected 66 chars, got ${clean.length}`);
   }
   const prefix = clean.slice(0, 2);
+  if (prefix !== '02' && prefix !== '03') {
+    throw new Error(`Invalid compressed public key prefix: expected 02 or 03, got ${prefix}`);
+  }
   const x = BigInt('0x' + clean.slice(2));
   if (x >= CURVE_P) {
     throw new Error('Public key x coordinate out of range');
@@ -292,9 +647,11 @@ function decompressPublicKey(publicKeyHex: string): CurvePoint {
  */
 export function signPayload(payload: string | object, privateKeyHex: string): string {
   const cleanPriv = privateKeyHex.replace(/^0x/, '');
+  assertKeyNotCompromised(cleanPriv, 'signing private key');
+
   const d = mod(BigInt('0x' + cleanPriv), CURVE_N);
   if (d === 0n) {
-    throw new Error('Invalid private key for signing');
+    throw new Error('Invalid private key for signing: scalar is zero or divisible by curve order');
   }
 
   const messageStr = typeof payload === 'string' ? payload : canonicalizeJson(payload);
@@ -325,6 +682,12 @@ export function signPayload(payload: string | object, privateKeyHex: string): st
 export function verifySignature(payload: string | object, signature: string, publicKeyHex: string): boolean {
   try {
     if (!signature || typeof signature !== 'string') return false;
+    const cleanPub = publicKeyHex.replace(/^0x/, '');
+    if (isKeyCompromised(cleanPub)) {
+      // Reject any signature claiming to be from a revoked/compromised key
+      return false;
+    }
+
     const parts = signature.split(':');
     if (parts.length !== 4 || parts[0] !== 'sig' || parts[1] !== 'schnorr') {
       return false;
@@ -344,7 +707,6 @@ export function verifySignature(payload: string | object, signature: string, pub
 
     const messageStr = typeof payload === 'string' ? payload : canonicalizeJson(payload);
     const msgHash = computeSha256(messageStr);
-    const cleanPub = publicKeyHex.replace(/^0x/, '');
     const pubPoint = decompressPublicKey(cleanPub);
 
     // e = SHA256(Rx || PubKey || MsgHash) mod N
@@ -366,16 +728,3 @@ export function verifySignature(payload: string | object, signature: string, pub
     return false;
   }
 }
-
-// ============================================================================
-// 4. Default Sovereign Key Infrastructure (Anchors for Q-Mesh Subsystems)
-// ============================================================================
-
-// Sovereign Root Authority KeyPair (PROVISO & CommitReceipt Root)
-export const SOVEREIGN_ROOT_AUTHORITY = generateKeyPair('guardian_oracle_sovereign_root_master_seed_2026');
-
-// Cascadia Mesh Root Certificate Authority (CA Admission Root)
-export const CASCADIA_ROOT_CA = generateKeyPair('cascadia_mesh_root_certificate_authority_seed_2026');
-
-// Standard Node Operator KeyPair for certified nodes
-export const OPERATOR_NODE_ALPHA = generateKeyPair('operator_node_alpha_mesh_certified_seed_2026');

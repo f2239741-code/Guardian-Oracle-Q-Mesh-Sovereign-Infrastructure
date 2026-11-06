@@ -371,6 +371,22 @@ const ProvisoLiveWorkbench: React.FC = () => {
         <span className="text-xs font-mono text-emerald-400">Executable Module 3 Active</span>
       </div>
 
+      <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-3 text-xs flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span className="font-mono text-slate-300 font-semibold">Key Sovereignty:</span>
+          <span className="text-slate-400">Secp256k1 CSPRNG Ephemeral Authority (Zero Committed Seeds)</span>
+        </div>
+        <div className="flex items-center gap-2 font-mono text-[11px]">
+          <span className="text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 px-2 py-0.5 rounded">
+            Compromised Seeds Blacklisted
+          </span>
+          <span className="text-cyan-400 bg-cyan-950/40 border border-cyan-800/60 px-2 py-0.5 rounded">
+            Public Key Trust Anchors
+          </span>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="space-y-4">
           <div className="space-y-2">
@@ -558,6 +574,22 @@ const CommitReceiptLiveWorkbench: React.FC = () => {
           </div>
         </div>
         <span className="text-xs font-mono text-emerald-400">Executable Module 4 Active</span>
+      </div>
+
+      <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-3 text-xs flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span className="font-mono text-slate-300 font-semibold">TRACEs Provenance:</span>
+          <span className="text-slate-400">Digital Schnorr Signatures Verified against Sovereign Public Keys</span>
+        </div>
+        <div className="flex items-center gap-2 font-mono text-[11px]">
+          <span className="text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 px-2 py-0.5 rounded">
+            Content-Addressed
+          </span>
+          <span className="text-cyan-400 bg-cyan-950/40 border border-cyan-800/60 px-2 py-0.5 rounded">
+            Decoupled Authority Signer
+          </span>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

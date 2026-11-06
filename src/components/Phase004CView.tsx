@@ -491,6 +491,22 @@ export const Phase004CView: React.FC = () => {
           <span className="text-xs font-mono text-slate-400">CascadiaMeshTransport</span>
         </div>
 
+        <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-3 text-xs flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span className="font-mono text-slate-300 font-semibold">CA Admission Sovereignty:</span>
+            <span className="text-slate-400">Secp256k1 CSPRNG Root CA · Independent Public Key Registry</span>
+          </div>
+          <div className="flex items-center gap-2 font-mono text-[11px]">
+            <span className="text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 px-2 py-0.5 rounded">
+              Revoked Seeds Blacklisted
+            </span>
+            <span className="text-cyan-400 bg-cyan-950/40 border border-cyan-800/60 px-2 py-0.5 rounded">
+              Fail-Closed CA Verification
+            </span>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="space-y-4">
             <div className="space-y-2">
